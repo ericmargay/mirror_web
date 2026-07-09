@@ -6,66 +6,59 @@ from pathlib import Path
 from .browser import save_auth_state
 from .config import MirrorConfig
 from .crawler import MirrorCrawler
-from .url_utils import UrlTools
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="web-mirror",
-        description="Authorized static website mirror built with Playwright.",
+        description="Authorized static website mirroring tool powered by Playwright.",
     )
-
     parser.add_argument("url", help="Initial URL. Example: https://example.com")
-    parser.add_argument("-o", "--output", default="mirror", help="Output directory")
+    parser.add_argument("-o", "--output", default="mirror", help="Output folder")
     parser.add_argument(
         "--max-pages",
         type=int,
         default=30,
-        help="Maximum number of internal pages to crawl. Use 0 for unlimited.",
+        help="Maximum number of internal pages to visit. Use 0 for unlimited.",
     )
     parser.add_argument(
         "--include-external",
         action="store_true",
-        help="Save external assets from CDNs, font providers, image hosts, etc.",
+        help="Save external assets from CDNs/third-party domains. Page crawling still stays internal.",
     )
-    parser.add_argument(
-        "--no-robots",
-        action="store_true",
-        help="Disable robots.txt checks. Use only for sites you own/control.",
-    )
-    parser.add_argument("--delay", type=float, default=0.5, help="Delay between page visits")
-    parser.add_argument("--timeout-ms", type=int, default=45_000, help="Page timeout in ms")
-    parser.add_argument("--max-asset-mb", type=int, default=80, help="Max size per asset")
-    parser.add_argument("--auth", default=None, help="Path to a Playwright auth state JSON")
-    parser.add_argument("--headed", action="store_true", help="Run Chromium in visible mode")
-    parser.add_argument(
-        "--save-auth",
-        default=None,
-        help="Open a visible browser, sign in manually, and save auth state to this JSON file.",
-    )
-
+    parser.add_argument("--no-robots", action="store_true", help="Disable robots.txt checks")
+    parser.add_argument("--delay", type=float, default=0.5, help="Delay between pages in seconds")
+    parser.add_argument("--timeout-ms", type=int, default=45_000, help="Page load timeout in milliseconds")
+    parser.add_argument("--max-asset-mb", type=int, default=80, help="Maximum size per asset in MB")
+    parser.add_argument("--auth", default=None, help="Use a Playwright storage_state JSON file")
+    parser.add_argument("--headed", action="store_true", help="Show the browser while crawling")
+    parser.add_argument("--save-auth", default=None, help="Open browser and save session to this JSON file")
     return parser
 
 
 def main() -> None:
     args = build_parser().parse_args()
-    normalized_url = UrlTools.normalize(args.url)
 
     if args.save_auth:
-        save_auth_state(normalized_url, Path(args.save_auth))
+        save_auth_state(args.url, args.save_auth)
         return
 
     config = MirrorConfig(
-        start_url=normalized_url,
+        start_url=args.url,
         output_dir=Path(args.output),
-        max_pages=None if args.max_pages == 0 else args.max_pages,
-        include_external_assets=args.include_external,
+        max_pages=args.max_pages,
+        include_external=args.include_external,
         respect_robots=not args.no_robots,
         delay_seconds=args.delay,
         timeout_ms=args.timeout_ms,
         max_asset_mb=args.max_asset_mb,
-        auth_state=Path(args.auth) if args.auth else None,
+        auth_state=args.auth,
         headed=args.headed,
     )
 
-    MirrorCrawler(config).run()
+    crawler = MirrorCrawler(config)
+    crawler.crawl()
+
+
+if __name__ == "__main__":
+    main()

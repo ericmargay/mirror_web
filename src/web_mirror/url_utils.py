@@ -1,42 +1,48 @@
 from __future__ import annotations
 
+import os
 import re
+from pathlib import Path
 from urllib.parse import urldefrag, urljoin, urlparse
 
 
-class UrlTools:
-    """Small URL normalization helper used across the project."""
+def clean_url(url: str) -> str:
+    url = (url or "").strip()
+    if not url:
+        return url
+    if not urlparse(url).scheme:
+        url = "https://" + url
+    url, _ = urldefrag(url)
+    return url
 
-    @staticmethod
-    def normalize(url: str, base_url: str | None = None) -> str:
-        value = (url or "").strip()
 
-        if base_url:
-            value = urljoin(base_url, value)
+def absolute_url(base_url: str, value: str) -> str:
+    return clean_url(urljoin(base_url, value))
 
-        if not urlparse(value).scheme:
-            value = "https://" + value
 
-        value, _fragment = urldefrag(value)
-        return value.rstrip("/") if value.endswith("/") and urlparse(value).path == "/" else value
+def is_http_url(url: str) -> bool:
+    return urlparse(url).scheme in {"http", "https"}
 
-    @staticmethod
-    def origin(url: str) -> str:
-        parsed = urlparse(url)
-        return f"{parsed.scheme}://{parsed.netloc}"
 
-    @staticmethod
-    def domain(url: str) -> str:
-        return urlparse(url).netloc
+def origin(url: str) -> str:
+    p = urlparse(url)
+    return f"{p.scheme}://{p.netloc}"
 
-    @staticmethod
-    def is_http(url: str) -> bool:
-        return urlparse(url).scheme in {"http", "https"}
 
-    @staticmethod
-    def is_same_domain(left: str, right: str) -> bool:
-        return UrlTools.domain(left) == UrlTools.domain(right)
+def domain(url: str) -> str:
+    return urlparse(url).netloc
 
-    @staticmethod
-    def is_ignored_scheme(url: str) -> bool:
-        return bool(re.match(r"^(data|blob|javascript|mailto|tel):", url.strip(), re.I))
+
+def safe_path_part(text: str, max_len: int = 120) -> str:
+    text = text.strip()
+    text = re.sub(r"[^a-zA-Z0-9._-]+", "_", text)
+    return text[:max_len] or "file"
+
+
+def relative_path(target: Path, source: Path) -> str:
+    return os.path.relpath(target, source.parent).replace("\\", "/")
+
+
+def should_skip_scheme(value: str) -> bool:
+    value = (value or "").strip().lower()
+    return value.startswith(("data:", "blob:", "javascript:", "mailto:", "tel:", "#"))

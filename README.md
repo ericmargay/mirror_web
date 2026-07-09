@@ -1,326 +1,682 @@
-# Authorized Web Mirror
+# Web Mirror Pro
 
-A developer-friendly Python tool for creating an authorized static mirror of a website.
+A Python-based static website mirroring tool that uses Playwright to render pages like a real browser, capture loaded resources, and save a local static copy of a website.
 
-It opens pages with Playwright, waits for the browser to load resources, saves HTML/CSS/JS/images/fonts/assets, and rewrites local references so the mirrored site can be served locally.
+This project is designed for authorized use cases such as backing up your own websites, archiving public pages you are allowed to access, testing static exports, or studying frontend structure.
 
-> This project is intended for websites you own, maintain, are archiving for internal use, or have explicit permission to mirror. It does not bypass CAPTCHAs, paywalls, anti-bot systems, private APIs, or access controls.
+> This tool is not intended to bypass captchas, paywalls, authentication systems, anti-bot protections, rate limits, or any access restrictions.
 
 ---
 
 ## Features
 
-- Browser-rendered capture using Playwright/Chromium.
-- Downloads HTML, CSS, JavaScript, images, fonts, SVGs, JSON, media files and other loaded assets.
-- Rewrites local references in:
-  - HTML attributes: `src`, `href`, `srcset`, `poster`, `data`, etc.
-  - CSS `url(...)` references.
-  - CSS `@import` references.
-  - Inline `style="..."` attributes.
-  - `<style>...</style>` blocks.
-- Optional external asset mirroring for CDNs, font providers and image hosts.
-- Optional authenticated session support using Playwright `storage_state`.
-- robots.txt support enabled by default.
-- Clean modular architecture suitable for GitHub and future extensions.
-- `--max-pages 0` support for unlimited internal page crawling.
+- Renders pages using Chromium through Playwright.
+- Saves HTML pages as local files.
+- Captures loaded assets from browser network responses.
+- Downloads common frontend resources:
+  - CSS
+  - JavaScript
+  - Images
+  - SVG
+  - Fonts
+  - JSON
+  - Videos/audio when discovered
+  - Manifests and favicons
+  - GLB/GLTF and other static files when loaded by the page
+- Rewrites local HTML asset references.
+- Rewrites CSS `url(...)` and `@import` references.
+- Supports internal crawling.
+- Supports optional external asset downloading.
+- Supports `robots.txt` by default.
+- Supports authorized browser sessions using Playwright storage state.
+- Includes a direct `run.py` entrypoint so the project can be executed without installing it as a package.
+- Can also be installed as a local editable Python package.
+
+---
+
+## Project Structure
+
+```text
+web-mirror-pro/
+├── README.md
+├── .gitignore
+├── requirements.txt
+├── pyproject.toml
+├── run.py
+└── src/
+    └── web_mirror/
+        ├── __init__.py
+        ├── __main__.py
+        ├── browser.py
+        ├── cli.py
+        ├── config.py
+        ├── crawler.py
+        ├── policies.py
+        ├── resources.py
+        ├── rewriters.py
+        ├── storage.py
+        └── url_utils.py
+```
+
+---
+
+## Requirements
+
+- Python 3.10 or newer
+- pip
+- Playwright Chromium browser runtime
+
+The project is intended to work on Windows, macOS, and Linux.
+
+---
+
+## Installation
+
+Install the dependencies:
+
+```bash
+python -m pip install -r requirements.txt
+python -m playwright install chromium
+```
+
+If your system uses `python3` instead of `python`, use:
+
+```bash
+python3 -m pip install -r requirements.txt
+python3 -m playwright install chromium
+```
 
 ---
 
 ## Quick Start
 
-### 1. Create and activate a virtual environment
+From the project root, run:
 
-```powershell
-python.exe -m venv .venv
-.\.venv\Scripts\activate
+```bash
+python run.py https://example.com -o mirror_example --max-pages 50
 ```
 
-### 2. Install dependencies
+If your system uses `python3`:
 
-```powershell
-python.exe -m pip install -r requirements.txt
-python.exe -m playwright install chromium
+```bash
+python3 run.py https://example.com -o mirror_example --max-pages 50
 ```
 
-Or install as a local package:
+This will:
 
-```powershell
-python.exe -m pip install -e .
-python.exe -m playwright install chromium
+1. Open the website with Chromium.
+2. Render the page.
+3. Save the HTML.
+4. Capture and save loaded assets.
+5. Rewrite local references when possible.
+6. Continue crawling internal links until the page limit is reached.
+
+---
+
+## Download External Assets
+
+By default, the crawler saves resources from the same domain. To also save external assets from CDNs, font providers, image hosts, and other third-party sources, use:
+
+```bash
+python run.py https://example.com -o mirror_example --max-pages 50 --include-external
 ```
 
-### 3. Mirror a website
+Example:
 
-Using the module directly:
-
-```powershell
-python.exe -m web_mirror https://example.com -o mirror --max-pages 50
-```
-
-If installed with `pip install -e .`, you can also use the CLI command:
-
-```powershell
-web-mirror https://example.com -o mirror --max-pages 50
+```bash
+python run.py https://limbs.fromtheghost.com/ -o web_mirror_limbs_fromtheghost --max-pages 5000 --include-external
 ```
 
 ---
 
-## Common Commands
+## Unlimited Internal Pages
 
-### Mirror with no internal page limit
+Use `--max-pages 0` to remove the internal page limit:
 
-```powershell
-python.exe -m web_mirror https://example.com -o mirror --max-pages 0
+```bash
+python run.py https://example.com -o mirror_example --max-pages 0 --include-external
 ```
 
-### Mirror with no internal page limit and include external assets
+Be careful with this option. Large websites can contain thousands or millions of internal URLs.
 
-```powershell
-python.exe -m web_mirror https://example.com -o mirror --max-pages 0 --include-external --delay 1
-```
+Recommended safer version:
 
-### Run Chromium visibly while mirroring
-
-Useful for debugging websites that rely heavily on JavaScript.
-
-```powershell
-python.exe -m web_mirror https://example.com -o mirror --headed
-```
-
-### Limit asset size
-
-```powershell
-python.exe -m web_mirror https://example.com -o mirror --max-asset-mb 25
-```
-
-### Use a longer timeout
-
-```powershell
-python.exe -m web_mirror https://example.com -o mirror --timeout-ms 90000
+```bash
+python run.py https://example.com -o mirror_example --max-pages 5000 --include-external --delay 1
 ```
 
 ---
 
-## Authenticated Sites You Own or Are Authorized to Access
+## Run the Mirrored Site Locally
 
-Some sites require a valid session. You can open a real browser, sign in manually, and save the session state.
+After the mirror is generated, you can serve the downloaded site with Python's built-in HTTP server.
 
-### Save session
+For example, if you used:
 
-```powershell
-python.exe -m web_mirror https://your-site.com --save-auth auth.json
+```bash
+python run.py https://example.com -o mirror_example --max-pages 50 --include-external
 ```
 
-### Reuse session
+Enter the generated output folder:
 
-```powershell
-python.exe -m web_mirror https://your-site.com -o mirror --auth auth.json --max-pages 50
+```bash
+cd mirror_example
 ```
 
-Keep `auth.json` private. Do not commit it to GitHub.
+Start a local server:
 
----
-
-## Serve the Mirror Locally
-
-After mirroring, serve the folder with Python:
-
-```powershell
-cd mirror
-python.exe -m http.server 8080
+```bash
+python -m http.server 8080
 ```
 
-Then open:
+If your system uses `python3`:
+
+```bash
+python3 -m http.server 8080
+```
+
+Then open this in your browser:
 
 ```text
 http://localhost:8080
 ```
 
-The generated structure usually looks like this:
+Most mirrors are saved inside a domain folder. For example, if the mirrored site was `https://example.com`, the local files may be inside:
 
 ```text
-mirror/
-└── example.com/
-    ├── index.html
-    ├── about/
-    │   └── index.html
-    ├── assets/
-    │   ├── app.css
-    │   ├── app.js
-    │   └── logo.svg
-    └── fonts/
-        └── inter.woff2
+mirror_example/example.com/
+```
+
+In that case, open:
+
+```text
+http://localhost:8080/example.com/
+```
+
+For the example:
+
+```bash
+python run.py https://limbs.fromtheghost.com/ -o web_mirror_limbs_fromtheghost --max-pages 5000 --include-external
+```
+
+Run:
+
+```bash
+cd web_mirror_limbs_fromtheghost
+python -m http.server 8080
+```
+
+Then try:
+
+```text
+http://localhost:8080/limbs.fromtheghost.com/
+```
+
+If the domain folder name is slightly different because of filename sanitization, list the output directory and open the folder that was generated.
+
+On Windows PowerShell:
+
+```powershell
+dir
+```
+
+On macOS/Linux:
+
+```bash
+ls
 ```
 
 ---
 
-## Architecture
+## Authorized Login Sessions
 
-```text
-src/web_mirror/
-├── __init__.py
-├── __main__.py
-├── browser.py       # Playwright lifecycle and auth-state helper
-├── cli.py           # CLI argument parsing and config creation
-├── config.py        # Immutable runtime configuration
-├── crawler.py       # High-level crawl orchestration
-├── policies.py      # URL scope and robots.txt policies
-├── resources.py     # Network resource capture/fetch facade
-├── rewriters.py     # HTML/CSS rewriting logic
-├── storage.py       # URL-to-local-path mapping and file persistence
-└── url_utils.py     # URL normalization helpers
+For websites you own or are allowed to access, you can manually log in through the browser and save the session.
+
+Create an authorized session:
+
+```bash
+python run.py https://your-site.com --save-auth auth.json
 ```
 
-### Design Patterns Used
+A visible browser will open. Log in manually. When finished, return to the terminal and press `ENTER`.
 
-#### 1. Orchestrator
+Then reuse that session:
 
-`MirrorCrawler` coordinates the high-level process:
+```bash
+python run.py https://your-site.com -o mirror_private --auth auth.json --max-pages 100
+```
 
-1. Open page.
-2. Capture browser responses.
-3. Rewrite rendered HTML.
-4. Save page.
-5. Queue internal links.
-
-The crawler does not directly know how to rewrite CSS, map files, or evaluate robots.txt.
-
-#### 2. Facade
-
-`ResourceManager` hides the details of:
-
-- Playwright network responses.
-- Fallback asset downloads with `requests`.
-- Asset size limits.
-- robots.txt checks.
-- CSS post-processing.
-
-HTML and CSS rewriters only ask for: “ensure this asset exists locally.”
-
-#### 3. Repository
-
-`FileStore` owns all filesystem concerns:
-
-- Safe filenames.
-- Query hash handling.
-- Extension inference from content type.
-- URL-to-path mapping.
-- Relative path generation.
-
-#### 4. Policy Object
-
-`ScopePolicy` centralizes decisions about what can be visited or saved.
-
-Pages are intentionally limited to the starting domain. External resources are only saved when `--include-external` is enabled.
-
-#### 5. Adapter
-
-`RobotsPolicy` adapts Python’s `urllib.robotparser` API into a simple `can_fetch(url)` method.
-
-#### 6. Context Manager
-
-`BrowserSession` manages the Playwright lifecycle and guarantees cleanup of browser/context resources.
+`auth.json` may contain sensitive authentication cookies or tokens. Do not commit it to Git.
 
 ---
 
 ## CLI Reference
 
 ```text
-usage: web-mirror [-h] [-o OUTPUT] [--max-pages MAX_PAGES]
-                  [--include-external] [--no-robots] [--delay DELAY]
-                  [--timeout-ms TIMEOUT_MS] [--max-asset-mb MAX_ASSET_MB]
-                  [--auth AUTH] [--headed] [--save-auth SAVE_AUTH]
-                  url
+python run.py URL [options]
 ```
 
 ### Arguments
 
+| Argument | Description |
+|---|---|
+| `URL` | Initial URL to mirror. Example: `https://example.com` |
+
+### Options
+
 | Option | Description |
 |---|---|
-| `url` | Initial URL to mirror. |
-| `-o`, `--output` | Output directory. Default: `mirror`. |
-| `--max-pages` | Maximum internal pages to crawl. Use `0` for unlimited. |
-| `--include-external` | Save external assets such as CDN scripts, fonts and images. |
-| `--no-robots` | Disable robots.txt checks. Use only for sites you own/control. |
-| `--delay` | Delay between page visits in seconds. Default: `0.5`. |
-| `--timeout-ms` | Page load timeout in milliseconds. Default: `45000`. |
-| `--max-asset-mb` | Maximum asset size in MB. Default: `80`. |
-| `--auth` | Path to a saved Playwright auth-state JSON file. |
-| `--headed` | Open Chromium visibly. Useful for debugging. |
-| `--save-auth` | Save a manual login session to a JSON file. |
+| `-o`, `--output` | Output folder. Default: `mirror` |
+| `--max-pages` | Maximum number of internal HTML pages to crawl. Use `0` for unlimited. |
+| `--include-external` | Save external assets loaded from third-party domains. |
+| `--no-robots` | Disable `robots.txt` checking. Use responsibly. |
+| `--delay` | Delay between page visits, in seconds. |
+| `--timeout-ms` | Page navigation timeout in milliseconds. |
+| `--max-asset-mb` | Maximum size per downloaded asset. |
+| `--auth` | Path to a Playwright storage state file such as `auth.json`. |
+| `--headed` | Run Chromium in visible mode. |
+| `--save-auth` | Open browser and save a manual authenticated session. |
+
+---
+
+## Examples
+
+### Mirror a small public site
+
+```bash
+python run.py https://example.com -o mirror_example --max-pages 20
+```
+
+### Mirror with external CDN assets
+
+```bash
+python run.py https://example.com -o mirror_example --max-pages 100 --include-external
+```
+
+### Large internal crawl
+
+```bash
+python run.py https://example.com -o mirror_example --max-pages 5000 --include-external --delay 1
+```
+
+### No page limit
+
+```bash
+python run.py https://example.com -o mirror_example --max-pages 0 --include-external --delay 1
+```
+
+### Run with a visible browser
+
+```bash
+python run.py https://example.com -o mirror_example --headed
+```
+
+### Use an authorized session
+
+```bash
+python run.py https://example.com --save-auth auth.json
+python run.py https://example.com -o mirror_example --auth auth.json
+```
+
+---
+
+## Optional Package Installation
+
+The project can also be installed locally as a package:
+
+```bash
+python -m pip install -e .
+```
+
+Then you can run:
+
+```bash
+python -m web_mirror https://example.com -o mirror_example --max-pages 50
+```
+
+Or, if the console script is available:
+
+```bash
+web-mirror https://example.com -o mirror_example --max-pages 50
+```
+
+For the simplest workflow, `run.py` is recommended.
+
+---
+
+## Design and Architecture
+
+The project separates responsibilities into small modules instead of keeping everything in one large script.
+
+### Main Concepts
+
+#### `config.py`
+
+Defines the crawler configuration. This keeps command-line parsing separate from runtime behavior.
+
+#### `cli.py`
+
+Parses CLI arguments and creates the configuration object.
+
+#### `crawler.py`
+
+Coordinates the crawl process:
+
+- Maintains the page queue.
+- Opens pages with Playwright.
+- Tracks visited pages.
+- Sends HTML to the rewriting layer.
+- Saves output through the storage layer.
+
+#### `browser.py`
+
+Creates and manages the Playwright browser context.
+
+#### `resources.py`
+
+Handles network responses and asset saving.
+
+#### `rewriters.py`
+
+Rewrites HTML and CSS references so local files point to local assets.
+
+#### `storage.py`
+
+Maps remote URLs to safe local file paths.
+
+#### `policies.py`
+
+Contains crawl policy decisions such as:
+
+- Same-domain filtering
+- External asset handling
+- `robots.txt` checking
+
+#### `url_utils.py`
+
+Contains URL normalization and utility helpers.
+
+---
+
+## Patterns Used
+
+### Separation of Concerns
+
+Each module has a clear responsibility: crawling, storage, rewriting, resource handling, policy checks, and CLI setup are separated.
+
+### Configuration Object
+
+Runtime options are grouped into a single configuration object instead of being passed as many unrelated parameters.
+
+### Strategy-Like Policy Layer
+
+Crawling decisions are handled through policy functions/classes. This makes it easier to add new rules later.
+
+Examples:
+
+- Same-domain only
+- Include external assets
+- Respect or ignore `robots.txt`
+- Maximum asset size
+
+### Adapter Around Playwright
+
+The browser handling is isolated from the crawler logic. This makes it easier to replace or extend the browser runtime in the future.
+
+### Storage Abstraction
+
+URL-to-file conversion is centralized, so filenames, query hashes, domain folders, and safe path generation are handled consistently.
+
+---
+
+## What This Tool Can Mirror Well
+
+This tool works best with:
+
+- Static websites
+- Marketing pages
+- Portfolio sites
+- Documentation sites
+- Landing pages
+- Blogs
+- Frontend-heavy pages where assets are loaded by the browser
+- Sites where you have permission to archive the content
+
+---
+
+## Known Limitations
+
+A static mirror is not the same as a full backend clone.
+
+The following features may not work offline:
+
+- Login flows
+- Forms
+- Search backed by a server
+- Dashboards
+- Payments
+- API calls requiring a backend
+- WebSockets
+- Server-rendered dynamic content after interaction
+- Infinite-scroll content not reached during the crawl
+- Protected media streams
+- Captcha-protected pages
+- Paywalled or restricted pages
+- Pages that require complex user interaction before loading all assets
+
+For sites you own, the best result usually comes from combining this tool with a proper static export or production build from the original framework.
+
+---
+
+## Ethical and Legal Use
+
+Use this project only when you have permission to access and archive the target website.
+
+Good use cases:
+
+- Backing up your own website
+- Archiving public pages responsibly
+- Testing static portability
+- Studying frontend structure for educational purposes
+- Saving authorized documentation
+- Migrating your own frontend assets
+
+Avoid using this tool for:
+
+- Impersonation
+- Phishing
+- Credential harvesting
+- Copyright infringement
+- Bypassing access restrictions
+- Evading anti-bot systems
+- Circumventing paywalls
+- Scraping private data without permission
+
+---
+
+## Recommended Workflow
+
+For a GitHub project, a clean workflow could be:
+
+```bash
+git clone YOUR_REPO_URL
+cd web-mirror-pro
+
+python -m pip install -r requirements.txt
+python -m playwright install chromium
+
+python run.py https://example.com -o mirror_example --max-pages 100 --include-external
+```
+
+Then inspect the output:
+
+```bash
+cd mirror_example
+python -m http.server 8080
+```
+
+Open:
+
+```text
+http://localhost:8080/example.com/
+```
 
 ---
 
 ## Development
 
-### Install dev dependencies
+Install the project in editable mode if you want to work on it as a package:
 
-```powershell
-python.exe -m pip install -e ".[dev]"
-python.exe -m playwright install chromium
+```bash
+python -m pip install -e .
 ```
 
-### Run linting
+Possible future development tools:
 
-```powershell
-ruff check src
-```
-
-### Run the CLI locally
-
-```powershell
-python.exe -m web_mirror https://example.com -o mirror --max-pages 5 --headed
+```bash
+python -m pip install pytest ruff black mypy
 ```
 
 ---
 
-## Limitations
+## Roadmap
 
-A static mirror is not the same as the original backend.
+Potential improvements:
 
-This tool can save the files that the browser can access and rewrite many local references, but it cannot reproduce:
-
-- Server-side rendering at request time.
-- Databases.
-- Private APIs.
-- Payment flows.
-- Forms that depend on a backend.
-- WebSockets or live dashboards.
-- Authentication systems.
-- CAPTCHA/anti-bot flows.
-- Paywalled or restricted content without permission.
-
-For your own projects, the most reliable static output is usually the framework’s native export/build process, such as Astro, Vite, Next.js static export, Nuxt generate, etc. This mirror is useful when you do not have access to the original build pipeline or want an archival copy of rendered pages.
+- Sitemap support
+- Config file support using `mirror.yml`
+- Better asset deduplication
+- Better SPA route discovery
+- Screenshot-based verification
+- Export report as JSON
+- Retry and backoff strategy
+- Parallel asset downloads
+- Media filtering by file type
+- Include/exclude URL patterns
+- Maximum crawl depth
+- Custom headers
+- Cookie import/export
+- Dockerfile
+- GitHub Actions CI
+- Unit tests
 
 ---
 
-## Safe and Responsible Use
+## Troubleshooting
 
-Use this tool only when you have permission to mirror the content. Respect site terms, rate limits, robots.txt, copyright, privacy and access controls.
+### `No module named web_mirror`
 
-Recommended defaults:
+Use the direct runner:
 
-```powershell
-python.exe -m web_mirror https://example.com -o mirror --delay 1 --max-pages 100
+```bash
+python run.py https://example.com -o mirror_example
 ```
 
-Use `--max-pages 0` carefully. On large websites it can create a very large local folder and run for a long time.
+Or install the package locally:
 
----
+```bash
+python -m pip install -e .
+```
 
-## Roadmap Ideas
+Then run:
 
-- Add JSON crawl report.
-- Add retry/backoff strategy.
-- Add asset deduplication by content hash.
-- Add sitemap.xml support.
-- Add include/exclude URL patterns.
-- Add tests for URL-to-path mapping and rewriters.
-- Add Dockerfile.
-- Add GitHub Actions workflow.
+```bash
+python -m web_mirror https://example.com -o mirror_example
+```
+
+### Playwright browser is missing
+
+Run:
+
+```bash
+python -m playwright install chromium
+```
+
+### BeautifulSoup installation error
+
+Do not install `BeautifulSoup`. That is an old package.
+
+Install the correct package:
+
+```bash
+python -m pip install beautifulsoup4
+```
+
+The Python import remains:
+
+```python
+from bs4 import BeautifulSoup
+```
+
+### Output folder is too large
+
+Reduce the page limit:
+
+```bash
+python run.py https://example.com -o mirror_example --max-pages 100
+```
+
+Or avoid external assets:
+
+```bash
+python run.py https://example.com -o mirror_example --max-pages 100
+```
+
+### The local copy does not look identical
+
+Common causes:
+
+- Some assets are blocked or loaded dynamically.
+- The site depends on backend APIs.
+- CSS or JS uses runtime-generated URLs.
+- Fonts or media are loaded from third-party services.
+- The page requires user interaction before loading all assets.
+
+Try:
+
+```bash
+python run.py https://example.com -o mirror_example --max-pages 100 --include-external --headed
+```
+
+### Local server opens the wrong page
+
+Start the server from inside the output directory:
+
+```bash
+cd mirror_example
+python -m http.server 8080
+```
+
+Then open the generated domain folder:
+
+```text
+http://localhost:8080/example.com/
+```
+
+If you do not know the generated folder name, list the directory:
+
+```bash
+ls
+```
+
+On Windows PowerShell:
+
+```powershell
+dir
+```
 
 ---
 
 ## License
 
-MIT
+Choose a license before publishing. Recommended options:
+
+- MIT License for a permissive open-source project.
+- Apache 2.0 if you want explicit patent language.
+- No license if you do not want to grant reuse rights yet.
+
+---
+
+## Disclaimer
+
+This project is provided for educational, archival, development, and authorized mirroring workflows. The user is responsible for complying with applicable laws, website terms, robots.txt, copyright restrictions, and access permissions.

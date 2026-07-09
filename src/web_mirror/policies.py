@@ -2,62 +2,52 @@ from __future__ import annotations
 
 from urllib.robotparser import RobotFileParser
 
-from .url_utils import UrlTools
+from .url_utils import clean_url, domain, is_http_url, origin
 
 
-class ScopePolicy:
-    """Decides whether URLs are inside the crawler/resource scope.
+class CrawlPolicy:
+    """Decides whether pages/assets are allowed to be visited or stored.
 
-    Pattern: Policy Object. The crawler delegates scope decisions here instead of
-    scattering domain checks across the codebase.
+    The default policy keeps page crawling inside the initial domain while still
+    allowing external assets when include_external=True.
     """
 
-    def __init__(self, start_url: str, include_external_assets: bool = False) -> None:
-        self.start_url = UrlTools.normalize(start_url)
-        self.start_domain = UrlTools.domain(self.start_url)
-        self.include_external_assets = include_external_assets
-
-    def can_visit_page(self, url: str) -> bool:
-        """Pages are intentionally limited to the initial domain."""
-        return UrlTools.is_http(url) and UrlTools.domain(url) == self.start_domain
-
-    def can_save_asset(self, url: str) -> bool:
-        """Assets may include external URLs when explicitly enabled."""
-        if not UrlTools.is_http(url):
-            return False
-        return self.include_external_assets or UrlTools.domain(url) == self.start_domain
-
-
-class RobotsPolicy:
-    """robots.txt adapter.
-
-    Pattern: Adapter. `urllib.robotparser` has a low-level API; this class exposes
-    the single decision the rest of the app needs.
-    """
-
-    def __init__(self, start_url: str, user_agent: str, enabled: bool = True) -> None:
-        self.enabled = enabled
+    def __init__(self, start_url: str, include_external: bool, respect_robots: bool, user_agent: str) -> None:
+        self.start_url = clean_url(start_url)
+        self.start_domain = domain(self.start_url)
+        self.include_external = include_external
+        self.respect_robots = respect_robots
         self.user_agent = user_agent
-        self.parser: RobotFileParser | None = None
+        self._robots = self._load_robots() if respect_robots else None
 
-        if not enabled:
-            return
-
-        robots_url = f"{UrlTools.origin(start_url)}/robots.txt"
-        parser = RobotFileParser()
-
+    def _load_robots(self) -> RobotFileParser | None:
+        rp = RobotFileParser()
         try:
-            parser.set_url(robots_url)
-            parser.read()
-            self.parser = parser
+            rp.set_url(f"{origin(self.start_url)}/robots.txt")
+            rp.read()
+            return rp
         except Exception:
-            self.parser = None
+            return None
 
     def can_fetch(self, url: str) -> bool:
-        if not self.enabled or self.parser is None:
+        if not self._robots:
             return True
-
         try:
-            return self.parser.can_fetch(self.user_agent, url)
+            return self._robots.can_fetch(self.user_agent, clean_url(url))
         except Exception:
             return True
+
+    def is_internal(self, url: str) -> bool:
+        return domain(clean_url(url)) == self.start_domain
+
+    def should_visit_page(self, url: str) -> bool:
+        url = clean_url(url)
+        return is_http_url(url) and self.is_internal(url) and self.can_fetch(url)
+
+    def should_save_asset(self, url: str) -> bool:
+        url = clean_url(url)
+        if not is_http_url(url):
+            return False
+        if not self.can_fetch(url):
+            return False
+        return self.include_external or self.is_internal(url)

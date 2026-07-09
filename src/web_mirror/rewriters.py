@@ -2,21 +2,18 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
+from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
-from .url_utils import UrlTools
-
-if TYPE_CHECKING:
-    from .resources import ResourceManager
-    from .storage import FileStore
-
+from .resources import ResourceDownloader
+from .storage import FileStorage
+from .url_utils import absolute_url, clean_url, is_http_url, relative_path, should_skip_scheme
 
 CSS_URL_RE = re.compile(r'url\((["\']?)(.*?)\1\)', re.IGNORECASE)
 CSS_IMPORT_RE = re.compile(r'@import\s+(?:url\()?(["\']?)([^"\')\s;]+)\1', re.IGNORECASE)
 
-HTML_ASSET_ATTRIBUTES = {
+HTML_ASSET_ATTRS: dict[str, list[str]] = {
     "img": ["src", "srcset", "data-src", "data-lazy-src"],
     "script": ["src"],
     "link": ["href"],
@@ -31,151 +28,124 @@ HTML_ASSET_ATTRIBUTES = {
 
 
 class CssRewriter:
-    """Rewrites CSS `url(...)` and `@import` references to local files."""
+    """Rewrites CSS url(...) and @import references to local files."""
 
-    def __init__(self, store: FileStore, resources: ResourceManager) -> None:
-        self.store = store
-        self.resources = resources
+    def __init__(self, storage: FileStorage, downloader: ResourceDownloader) -> None:
+        self.storage = storage
+        self.downloader = downloader
 
-    def rewrite_file(self, css_path: Path, css_url: str) -> None:
+    def rewrite_file(self, css_file: Path, css_url: str) -> None:
         try:
-            css = css_path.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
+            css_text = css_file.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
             return
 
-        css = self.rewrite_text(css, base_url=css_url, source_path=css_path)
-        css_path.write_text(css, encoding="utf-8", errors="ignore")
+        rewritten = self.rewrite_text(css_text, base_url=css_url, source_file=css_file)
+        css_file.write_text(rewritten, encoding="utf-8", errors="ignore")
 
-    def rewrite_text(self, css: str, *, base_url: str, source_path: Path) -> str:
-        css = CSS_URL_RE.sub(lambda match: self._replace_css_url(match, base_url, source_path), css)
-        css = CSS_IMPORT_RE.sub(
-            lambda match: self._replace_css_import(match, base_url, source_path), css
-        )
-        return css
+    def rewrite_text(self, css_text: str, base_url: str, source_file: Path) -> str:
+        def replace_css_url(match: re.Match[str]) -> str:
+            raw = match.group(2).strip()
+            if not raw or should_skip_scheme(raw):
+                return match.group(0)
 
-    def _replace_css_url(self, match: re.Match[str], base_url: str, source_path: Path) -> str:
-        raw_url = match.group(2).strip()
+            asset_url = absolute_url(base_url, raw)
+            local = self.storage.get(asset_url) or self.downloader.fetch_if_missing(asset_url)
+            if not local:
+                return match.group(0)
 
-        if not raw_url or raw_url.startswith(("data:", "blob:", "#")):
-            return match.group(0)
+            return f"url({relative_path(local, source_file)})"
 
-        absolute_url = UrlTools.normalize(raw_url, base_url=base_url)
-        local_path = self.resources.ensure_asset(absolute_url)
+        css_text = CSS_URL_RE.sub(replace_css_url, css_text)
 
-        if not local_path:
-            return match.group(0)
+        def replace_import(match: re.Match[str]) -> str:
+            raw = match.group(2).strip()
+            if not raw or should_skip_scheme(raw):
+                return match.group(0)
 
-        return f"url({self.store.relative_path(local_path, source_path)})"
+            asset_url = absolute_url(base_url, raw)
+            local = self.storage.get(asset_url) or self.downloader.fetch_if_missing(asset_url)
+            if not local:
+                return match.group(0)
 
-    def _replace_css_import(self, match: re.Match[str], base_url: str, source_path: Path) -> str:
-        raw_url = match.group(2).strip()
+            return match.group(0).replace(raw, relative_path(local, source_file))
 
-        if not raw_url or raw_url.startswith(("data:", "blob:", "#")):
-            return match.group(0)
-
-        absolute_url = UrlTools.normalize(raw_url, base_url=base_url)
-        local_path = self.resources.ensure_asset(absolute_url)
-
-        if not local_path:
-            return match.group(0)
-
-        return match.group(0).replace(raw_url, self.store.relative_path(local_path, source_path))
+        return CSS_IMPORT_RE.sub(replace_import, css_text)
 
 
 class HtmlRewriter:
-    """Rewrites a rendered HTML document and returns internal links to crawl."""
+    """Rewrites an HTML document so saved assets/pages point to local paths."""
 
-    def __init__(self, store: FileStore, resources: ResourceManager) -> None:
-        self.store = store
-        self.resources = resources
-        self.css_rewriter = CssRewriter(store, resources)
+    def __init__(self, storage: FileStorage, downloader: ResourceDownloader, css_rewriter: CssRewriter) -> None:
+        self.storage = storage
+        self.downloader = downloader
+        self.css_rewriter = css_rewriter
 
-    def rewrite(self, html: str, page_url: str) -> tuple[str, list[str]]:
-        page_path = self.store.path_for_url(page_url, content_type="text/html", force_html=True)
+    def rewrite_srcset(self, value: str, base_url: str, page_file: Path) -> str:
+        items: list[str] = []
+        for item in value.split(","):
+            item = item.strip()
+            if not item:
+                continue
+
+            parts = item.split()
+            if not parts or should_skip_scheme(parts[0]):
+                items.append(item)
+                continue
+
+            asset_url = absolute_url(base_url, parts[0])
+            local = self.storage.get(asset_url) or self.downloader.fetch_if_missing(asset_url)
+            if local:
+                parts[0] = relative_path(local, page_file)
+            items.append(" ".join(parts))
+        return ", ".join(items)
+
+    def rewrite_asset_attr(self, tag, attr: str, page_url: str, page_file: Path) -> None:
+        value = tag.get(attr)
+        if not value or should_skip_scheme(value):
+            return
+
+        if attr == "srcset":
+            tag[attr] = self.rewrite_srcset(value, page_url, page_file)
+            return
+
+        asset_url = absolute_url(page_url, value)
+        local = self.storage.get(asset_url) or self.downloader.fetch_if_missing(asset_url)
+        if local:
+            tag[attr] = relative_path(local, page_file)
+
+    def rewrite_html(self, html: str, page_url: str) -> tuple[str, list[str]]:
+        page_url = clean_url(page_url)
+        page_file = self.storage.path_for_url(page_url, content_type="text/html", force_html=True)
         soup = BeautifulSoup(html, "html.parser")
-
-        self._rewrite_html_assets(soup, page_url, page_path)
-        self._rewrite_inline_styles(soup, page_url, page_path)
-        links_to_visit = self._rewrite_page_links(soup, page_url, page_path)
-
-        return str(soup), links_to_visit
-
-    def _rewrite_html_assets(self, soup: BeautifulSoup, page_url: str, page_path: Path) -> None:
-        for tag_name, attributes in HTML_ASSET_ATTRIBUTES.items():
-            for tag in soup.find_all(tag_name):
-                for attribute in attributes:
-                    value = tag.get(attribute)
-                    if not value or UrlTools.is_ignored_scheme(value):
-                        continue
-
-                    if attribute == "srcset":
-                        tag[attribute] = self._rewrite_srcset(value, page_url, page_path)
-                        continue
-
-                    absolute_url = UrlTools.normalize(value, base_url=page_url)
-                    local_path = self.resources.ensure_asset(absolute_url)
-
-                    if local_path:
-                        tag[attribute] = self.store.relative_path(local_path, page_path)
-
-    def _rewrite_srcset(self, srcset: str, page_url: str, page_path: Path) -> str:
-        rewritten_items = []
-
-        for item in srcset.split(","):
-            parts = item.strip().split()
-            if not parts:
-                continue
-
-            if UrlTools.is_ignored_scheme(parts[0]):
-                rewritten_items.append(" ".join(parts))
-                continue
-
-            absolute_url = UrlTools.normalize(parts[0], base_url=page_url)
-            local_path = self.resources.ensure_asset(absolute_url)
-
-            if local_path:
-                parts[0] = self.store.relative_path(local_path, page_path)
-
-            rewritten_items.append(" ".join(parts))
-
-        return ", ".join(rewritten_items)
-
-    def _rewrite_inline_styles(self, soup: BeautifulSoup, page_url: str, page_path: Path) -> None:
-        for tag in soup.find_all(style=True):
-            tag["style"] = self.css_rewriter.rewrite_text(
-                tag["style"],
-                base_url=page_url,
-                source_path=page_path,
-            )
-
-        for style_tag in soup.find_all("style"):
-            if style_tag.string:
-                style_tag.string.replace_with(
-                    self.css_rewriter.rewrite_text(
-                        style_tag.string,
-                        base_url=page_url,
-                        source_path=page_path,
-                    )
-                )
-
-    def _rewrite_page_links(self, soup: BeautifulSoup, page_url: str, page_path: Path) -> list[str]:
         links_to_visit: list[str] = []
 
-        for anchor in soup.find_all("a", href=True):
-            href = anchor.get("href", "")
+        for tag_name, attrs in HTML_ASSET_ATTRS.items():
+            for tag in soup.find_all(tag_name):
+                for attr in attrs:
+                    self.rewrite_asset_attr(tag, attr, page_url, page_file)
 
-            if not href or href.startswith("#") or UrlTools.is_ignored_scheme(href):
+        for tag in soup.find_all(style=True):
+            tag["style"] = self.css_rewriter.rewrite_text(tag["style"], page_url, page_file)
+
+        for style_tag in soup.find_all("style"):
+            text = style_tag.string
+            if text:
+                style_tag.string.replace_with(self.css_rewriter.rewrite_text(text, page_url, page_file))
+
+        for a in soup.find_all("a", href=True):
+            href = a.get("href", "")
+            if should_skip_scheme(href):
                 continue
 
-            absolute_url = UrlTools.normalize(href, base_url=page_url)
+            link_url = clean_url(urljoin(page_url, href))
+            if not is_http_url(link_url):
+                continue
 
-            if self.resources.scope.can_visit_page(absolute_url):
-                local_page_path = self.store.path_for_url(
-                    absolute_url,
-                    content_type="text/html",
-                    force_html=True,
-                )
-                anchor["href"] = self.store.relative_path(local_page_path, page_path)
-                links_to_visit.append(absolute_url)
+            # The crawler decides later if this page is visitable. Here we only
+            # point same-domain pages to the location where they would be saved.
+            local_page = self.storage.path_for_url(link_url, content_type="text/html", force_html=True)
+            a["href"] = relative_path(local_page, page_file)
+            links_to_visit.append(link_url)
 
-        return links_to_visit
+        return str(soup), links_to_visit

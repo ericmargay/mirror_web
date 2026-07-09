@@ -1,79 +1,87 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable
 
-from playwright.sync_api import Browser, BrowserContext, Page, Playwright, sync_playwright
-
-from .config import MirrorConfig
+from playwright.sync_api import Browser, BrowserContext, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
 
 class BrowserSession:
-    """Thin wrapper around Playwright lifecycle.
+    """Small wrapper around Playwright lifecycle."""
 
-    Pattern: Context Manager. Browser cleanup stays deterministic even if the crawl
-    fails in the middle.
-    """
-
-    def __init__(self, config: MirrorConfig) -> None:
-        self.config = config
-        self.playwright: Playwright | None = None
-        self.browser: Browser | None = None
-        self.context: BrowserContext | None = None
+    def __init__(
+        self,
+        headed: bool,
+        timeout_ms: int,
+        auth_state: str | None,
+        user_agent: str,
+        on_response: Callable | None = None,
+    ) -> None:
+        self.headed = headed
+        self.timeout_ms = timeout_ms
+        self.auth_state = auth_state
+        self.user_agent = user_agent
+        self.on_response = on_response
+        self._playwright = None
+        self._browser: Browser | None = None
+        self._context: BrowserContext | None = None
         self.page: Page | None = None
 
-    def __enter__(self) -> BrowserSession:
-        self.playwright = sync_playwright().start()
-        self.browser = self.playwright.chromium.launch(headless=not self.config.headed)
+    def __enter__(self) -> "BrowserSession":
+        self._playwright = sync_playwright().start()
+        self._browser = self._playwright.chromium.launch(headless=not self.headed)
 
         context_options = {
             "viewport": {"width": 1440, "height": 1200},
-            "user_agent": self.config.user_agent,
+            "user_agent": self.user_agent,
         }
+        if self.auth_state:
+            context_options["storage_state"] = self.auth_state
 
-        if self.config.auth_state:
-            context_options["storage_state"] = str(self.config.auth_state)
+        self._context = self._browser.new_context(**context_options)
+        if self.on_response:
+            self._context.on("response", self.on_response)
 
-        self.context = self.browser.new_context(**context_options)
-        self.page = self.context.new_page()
+        self.page = self._context.new_page()
         return self
 
-    def __exit__(self, exc_type, exc_value, traceback) -> None:  # noqa: ANN001
-        if self.context:
-            self.context.close()
-        if self.browser:
-            self.browser.close()
-        if self.playwright:
-            self.playwright.stop()
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self._context:
+            self._context.close()
+        if self._browser:
+            self._browser.close()
+        if self._playwright:
+            self._playwright.stop()
 
-    def on_response(self, callback) -> None:  # noqa: ANN001
-        if not self.context:
-            raise RuntimeError("Browser context is not started.")
-        self.context.on("response", callback)
-
-    def goto_and_get_html(self, url: str) -> str:
+    def goto_and_get_content(self, url: str) -> str | None:
         if not self.page:
-            raise RuntimeError("Browser page is not started.")
-
-        self.page.goto(url, wait_until="networkidle", timeout=self.config.timeout_ms)
+            raise RuntimeError("BrowserSession must be used as a context manager.")
+        try:
+            self.page.goto(url, wait_until="networkidle", timeout=self.timeout_ms)
+        except PlaywrightTimeoutError:
+            print("[warning] networkidle timeout; saving content loaded so far.")
+        except Exception as exc:
+            print(f"[error] page failed: {url} ({exc})")
+            return None
         return self.page.content()
 
 
-def save_auth_state(url: str, auth_file: Path) -> None:
-    """Open a visible browser so the user can sign in manually and store cookies/session."""
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=False)
+def save_auth_state(url: str, auth_file: str) -> None:
+    """Open a visible browser so the user can sign in manually and save storage state."""
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=False)
         context = browser.new_context()
         page = context.new_page()
-
-        print("A browser window will open.")
-        print("Sign in only to sites where you are authorized to access the content.")
-        print("When done, return here and press ENTER.")
-
         page.goto(url, wait_until="load", timeout=60_000)
-        input("Press ENTER after signing in... ")
 
-        context.storage_state(path=str(auth_file))
-        print(f"Auth state saved to: {auth_file}")
+        print("A browser window is open.")
+        print("Sign in manually only if you are authorized to access this website.")
+        input("Press ENTER here after you finish signing in... ")
+
+        Path(auth_file).parent.mkdir(parents=True, exist_ok=True)
+        context.storage_state(path=auth_file)
+        print(f"Auth state saved: {auth_file}")
 
         context.close()
         browser.close()

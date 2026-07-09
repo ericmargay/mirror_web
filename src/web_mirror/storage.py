@@ -3,19 +3,14 @@ from __future__ import annotations
 import hashlib
 import mimetypes
 import os
-import re
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .url_utils import UrlTools
+from .url_utils import clean_url, safe_path_part
 
 
-class FileStore:
-    """Maps remote URLs to local filesystem paths and persists content.
-
-    Pattern: Repository. The rest of the app does not care how paths are built
-    or where files are written; it asks this class to save/read resources.
-    """
+class FileStorage:
+    """Maps URLs to deterministic local file paths and writes files."""
 
     CONTENT_TYPE_EXTENSIONS = {
         "text/html": ".html",
@@ -31,118 +26,66 @@ class FileStore:
     }
 
     def __init__(self, output_dir: Path) -> None:
-        self.output_dir = Path(output_dir)
-        self.url_to_path: dict[str, Path] = {}
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.output_dir = output_dir
+        self.url_to_file: dict[str, Path] = {}
 
-    def has(self, url: str) -> bool:
-        return UrlTools.normalize(url) in self.url_to_path
+    def extension_from_content_type(self, content_type: str | None) -> str:
+        if not content_type:
+            return ""
+        normalized = content_type.split(";", 1)[0].strip().lower()
+        if normalized in self.CONTENT_TYPE_EXTENSIONS:
+            return self.CONTENT_TYPE_EXTENSIONS[normalized]
+        return mimetypes.guess_extension(normalized) or ""
 
-    def get(self, url: str) -> Path | None:
-        return self.url_to_path.get(UrlTools.normalize(url))
+    def path_for_url(self, url: str, content_type: str | None = None, force_html: bool = False) -> Path:
+        url = clean_url(url)
+        parsed = urlparse(url)
 
-    def save_bytes(
-        self,
-        url: str,
-        content: bytes,
-        *,
-        content_type: str | None = None,
-        force_html: bool = False,
-    ) -> Path:
-        local_path = self.path_for_url(url, content_type=content_type, force_html=force_html)
-        local_path.parent.mkdir(parents=True, exist_ok=True)
-        local_path.write_bytes(content)
-        self.url_to_path[UrlTools.normalize(url)] = local_path
-        return local_path
+        host = safe_path_part(parsed.netloc)
+        raw_path = parsed.path or "/"
 
-    def save_text(
-        self,
-        url: str,
-        content: str,
-        *,
-        content_type: str = "text/html",
-        force_html: bool = True,
-    ) -> Path:
-        local_path = self.path_for_url(url, content_type=content_type, force_html=force_html)
-        local_path.parent.mkdir(parents=True, exist_ok=True)
-        local_path.write_text(content, encoding="utf-8", errors="ignore")
-        self.url_to_path[UrlTools.normalize(url)] = local_path
-        return local_path
+        if raw_path.endswith("/"):
+            raw_path += "index.html" if force_html else "index"
 
-    def path_for_url(
-        self,
-        url: str,
-        *,
-        content_type: str | None = None,
-        force_html: bool = False,
-    ) -> Path:
-        normalized = UrlTools.normalize(url)
-        parsed = urlparse(normalized)
-
-        domain = self._safe_part(parsed.netloc)
-        url_path = parsed.path or "/"
-
-        if url_path.endswith("/"):
-            url_path += "index.html" if force_html else "index"
-
-        parts = [self._safe_part(part) for part in url_path.strip("/").split("/") if part]
+        parts = [safe_path_part(part) for part in raw_path.strip("/").split("/") if part]
         if not parts:
             parts = ["index.html" if force_html else "index"]
 
+        filename = parts[-1]
+        name, ext = os.path.splitext(filename)
+
         if force_html:
-            name, extension = os.path.splitext(parts[-1])
-            if not extension:
-                # `/about` becomes `/about/index.html` instead of colliding with `/index.html`.
-                parts.append("index.html")
-            elif extension.lower() not in {".html", ".htm"}:
-                parts[-1] = f"{parts[-1]}.html"
-        else:
-            parts[-1] = self._ensure_extension(
-                parts[-1],
-                content_type=content_type,
-                force_html=False,
-            )
+            if ext.lower() not in {".html", ".htm"}:
+                filename = f"{filename}.html" if ext else "index.html"
+        elif not ext:
+            guessed = self.extension_from_content_type(content_type)
+            if guessed:
+                filename += guessed
 
         if parsed.query:
             query_hash = hashlib.md5(parsed.query.encode("utf-8")).hexdigest()[:10]
-            name, extension = os.path.splitext(parts[-1])
-            parts[-1] = f"{name}_{query_hash}{extension}"
+            name, ext = os.path.splitext(filename)
+            filename = f"{name}_{query_hash}{ext}"
 
-        return self.output_dir / domain / Path(*parts)
+        parts[-1] = filename
+        return self.output_dir / host / Path(*parts)
 
-    def relative_path(self, target_path: Path, source_path: Path) -> str:
-        return os.path.relpath(target_path, source_path.parent).replace("\\", "/")
+    def remember(self, url: str, local_path: Path) -> None:
+        self.url_to_file[clean_url(url)] = local_path
 
-    def _ensure_extension(
-        self,
-        filename: str,
-        *,
-        content_type: str | None,
-        force_html: bool,
-    ) -> str:
-        name, extension = os.path.splitext(filename)
+    def get(self, url: str) -> Path | None:
+        return self.url_to_file.get(clean_url(url))
 
-        if force_html:
-            if extension.lower() not in {".html", ".htm"}:
-                return f"{filename}.html" if extension else "index.html"
-            return filename
+    def save_bytes(self, url: str, body: bytes, content_type: str | None = None, force_html: bool = False) -> Path:
+        local_path = self.path_for_url(url, content_type=content_type, force_html=force_html)
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.write_bytes(body)
+        self.remember(url, local_path)
+        return local_path
 
-        if extension:
-            return filename
-
-        guessed_extension = self._extension_from_content_type(content_type)
-        return filename + guessed_extension if guessed_extension else filename
-
-    def _extension_from_content_type(self, content_type: str | None) -> str:
-        if not content_type:
-            return ""
-
-        clean_content_type = content_type.split(";")[0].strip().lower()
-        if clean_content_type in self.CONTENT_TYPE_EXTENSIONS:
-            return self.CONTENT_TYPE_EXTENSIONS[clean_content_type]
-
-        return mimetypes.guess_extension(clean_content_type) or ""
-
-    def _safe_part(self, text: str) -> str:
-        safe = re.sub(r"[^a-zA-Z0-9._-]+", "_", text.strip())
-        return safe[:120] or "file"
+    def save_text(self, url: str, text: str, content_type: str = "text/html", force_html: bool = True) -> Path:
+        local_path = self.path_for_url(url, content_type=content_type, force_html=force_html)
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.write_text(text, encoding="utf-8", errors="ignore")
+        self.remember(url, local_path)
+        return local_path

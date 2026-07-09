@@ -3,111 +3,56 @@ from __future__ import annotations
 from pathlib import Path
 
 import requests
-from playwright.sync_api import Response
 
-from .config import MirrorConfig
-from .policies import RobotsPolicy, ScopePolicy
-from .storage import FileStore
-from .url_utils import UrlTools
+from .policies import CrawlPolicy
+from .storage import FileStorage
+from .url_utils import clean_url
 
 
-class ResourceManager:
-    """Saves network resources and fetches missing assets on demand.
-
-    Pattern: Facade. HTML/CSS rewriters interact with this one class instead of
-    knowing about Playwright responses, Requests, robots.txt, or filesystem paths.
-    """
+class ResourceDownloader:
+    """Downloads assets outside the browser pipeline when a rewriter discovers them."""
 
     def __init__(
         self,
-        *,
-        config: MirrorConfig,
-        store: FileStore,
-        scope: ScopePolicy,
-        robots: RobotsPolicy,
+        storage: FileStorage,
+        policy: CrawlPolicy,
+        max_asset_bytes: int,
+        user_agent: str,
     ) -> None:
-        self.config = config
-        self.store = store
-        self.scope = scope
-        self.robots = robots
-        self.saved_asset_urls: set[str] = set()
-
+        self.storage = storage
+        self.policy = policy
+        self.max_asset_bytes = max_asset_bytes
+        self.saved_urls: set[str] = set()
         self.session = requests.Session()
-        self.session.headers.update({"User-Agent": config.user_agent})
+        self.session.headers.update({"User-Agent": user_agent})
 
-    def handle_browser_response(self, response: Response) -> None:
-        """Capture resources loaded by the browser."""
-        url = UrlTools.normalize(response.url)
+    def save_response_body(self, url: str, body: bytes, content_type: str | None) -> Path | None:
+        url = clean_url(url)
+        if not self.policy.should_save_asset(url):
+            return None
+        if len(body) > self.max_asset_bytes:
+            print(f"[large] skipped: {url}")
+            return None
 
-        if not self._should_save(url):
-            return
-
-        if url in self.saved_asset_urls:
-            return
-
-        try:
-            body = response.body()
-        except Exception:
-            return
-
-        if len(body) > self.config.max_asset_bytes:
-            print(f"[large] skipped asset: {url}")
-            return
-
-        content_type = response.headers.get("content-type", "")
-
-        # The active page HTML is saved after rewriting by MirrorCrawler.
-        # Skipping text/html here avoids counting raw pages as assets.
-        if "text/html" in content_type.lower():
-            return
-
-        local_path = self.store.save_bytes(url, body, content_type=content_type)
-        self.saved_asset_urls.add(url)
-
-        if self._is_css(url, content_type, local_path):
-            self._rewrite_css(local_path, url)
-
+        local_path = self.storage.save_bytes(url, body, content_type=content_type)
+        self.saved_urls.add(url)
         print(f"[asset] {url}")
+        return local_path
 
-    def ensure_asset(self, url: str) -> Path | None:
-        """Return local path for an asset, fetching it if the browser did not capture it."""
-        normalized = UrlTools.normalize(url)
-
-        existing = self.store.get(normalized)
+    def fetch_if_missing(self, url: str) -> Path | None:
+        url = clean_url(url)
+        existing = self.storage.get(url)
         if existing:
             return existing
 
-        if not self._should_save(normalized):
+        if not self.policy.should_save_asset(url):
             return None
 
         try:
-            response = self.session.get(normalized, timeout=25)
+            response = self.session.get(url, timeout=25)
             response.raise_for_status()
-        except requests.RequestException:
+            content_type = response.headers.get("content-type", "")
+            return self.save_response_body(url, response.content, content_type)
+        except Exception as exc:
+            print(f"[error] asset failed: {url} ({exc})")
             return None
-
-        if len(response.content) > self.config.max_asset_bytes:
-            print(f"[large] skipped asset: {normalized}")
-            return None
-
-        content_type = response.headers.get("content-type", "")
-        local_path = self.store.save_bytes(normalized, response.content, content_type=content_type)
-        self.saved_asset_urls.add(normalized)
-
-        if self._is_css(normalized, content_type, local_path):
-            self._rewrite_css(local_path, normalized)
-
-        print(f"[asset] {normalized}")
-        return local_path
-
-    def _should_save(self, url: str) -> bool:
-        return self.scope.can_save_asset(url) and self.robots.can_fetch(url)
-
-    def _is_css(self, url: str, content_type: str, local_path: Path) -> bool:
-        return "text/css" in content_type.lower() or local_path.suffix.lower() == ".css"
-
-    def _rewrite_css(self, local_path: Path, url: str) -> None:
-        # Lazy import avoids a circular import between rewriters and resource manager.
-        from .rewriters import CssRewriter
-
-        CssRewriter(self.store, self).rewrite_file(local_path, url)
