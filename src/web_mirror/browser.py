@@ -5,6 +5,8 @@ from typing import Callable
 
 from playwright.sync_api import Browser, BrowserContext, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
+from .snapshot import AUTO_SCROLL_JS, EXTRACT_JS
+
 
 class BrowserSession:
     """Small wrapper around Playwright lifecycle."""
@@ -63,7 +65,30 @@ class BrowserSession:
         except Exception as exc:
             print(f"[error] page failed: {url} ({exc})")
             return None
+        self.auto_scroll()
         return self.page.content()
+
+    def auto_scroll(self) -> None:
+        """Scroll to the bottom (and back) so lazy-loaded assets actually load."""
+
+        if not self.page:
+            return
+        try:
+            self.page.evaluate(AUTO_SCROLL_JS)
+            self.page.wait_for_timeout(800)
+        except Exception:
+            pass  # scrolling is best-effort
+
+    def extract_structured(self) -> dict | None:
+        """Collect the structured snapshot of the current page (see snapshot.py)."""
+
+        if not self.page:
+            return None
+        try:
+            return self.page.evaluate(EXTRACT_JS)
+        except Exception as exc:
+            print(f"[warning] structured extraction failed: {exc}")
+            return None
 
 
 def save_auth_state(url: str, auth_file: str) -> None:

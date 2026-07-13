@@ -11,8 +11,17 @@ This project is designed for authorized use cases such as backing up your own we
 ## Features
 
 - Renders pages using Chromium through Playwright.
+- Auto-scrolls each page so lazy-loaded images actually load before capture.
 - Saves HTML pages as local files.
 - Captures loaded assets from browser network responses.
+- Saves external assets (CDNs, image hosts, font providers) by default —
+  that is where most real sites keep their images. Crawling still stays
+  inside the initial domain. Use `--internal-only` to disable.
+- Downloads the largest `srcset` variant of every image (the best quality
+  the site offers), even if the browser never rendered it.
+- Deduplicates assets by content hash (CDN variants and cache busters map
+  to one file).
+- Writes a structured `snapshot.json` next to the static copy (see below).
 - Downloads common frontend resources:
   - CSS
   - JavaScript
@@ -54,6 +63,7 @@ web-mirror-pro/
         ├── policies.py
         ├── resources.py
         ├── rewriters.py
+        ├── snapshot.py
         ├── storage.py
         └── url_utils.py
 ```
@@ -113,19 +123,39 @@ This will:
 
 ---
 
-## Download External Assets
+## External Assets
 
-By default, the crawler saves resources from the same domain. To also save external assets from CDNs, font providers, image hosts, and other third-party sources, use:
+Since 0.3.0 the crawler saves external assets (CDNs, font providers, image
+hosts) **by default**, because that is where most real sites keep their
+images — a mirror without them loses exactly the valuable part. Page
+crawling always stays inside the initial domain.
+
+To restrict assets to the same domain:
 
 ```bash
-python run.py https://example.com -o mirror_example --max-pages 50 --include-external
+python run.py https://example.com -o mirror_example --max-pages 50 --internal-only
 ```
 
-Example:
+The old `--include-external` flag is still accepted (it is now a no-op).
 
-```bash
-python run.py https://limbs.fromtheghost.com/ -o web_mirror_limbs_fromtheghost --max-pages 5000 --include-external
-```
+---
+
+## Structured Snapshot (snapshot.json)
+
+Besides the static copy, every run writes `<output>/snapshot.json` with a
+machine-readable view of the site, collected inside the browser:
+
+- **Embedded app states**: `__NEXT_DATA__`, `__remixContext`, `__NUXT__`,
+  Apollo/Redux stores and `ld+json` blocks. Server-rendered sites usually
+  embed their full data there (products, prices, config), so downstream
+  tools can consume it without re-parsing HTML.
+- **Images with their best variant**: for each image, the largest `srcset`
+  candidate and its natural dimensions. The best variants are also
+  downloaded (disable with `--no-best-images`).
+- **Design tokens**: computed fonts and colors of body/headings/buttons and
+  the `theme-color` meta — the site's real design line.
+- **Heuristic product cards**: containers with one image, a name and a
+  price (useful for menus, catalogs and stores).
 
 ---
 
@@ -134,7 +164,7 @@ python run.py https://limbs.fromtheghost.com/ -o web_mirror_limbs_fromtheghost -
 Use `--max-pages 0` to remove the internal page limit:
 
 ```bash
-python run.py https://example.com -o mirror_example --max-pages 0 --include-external
+python run.py https://example.com -o mirror_example --max-pages 0
 ```
 
 Be careful with this option. Large websites can contain thousands or millions of internal URLs.
@@ -142,7 +172,7 @@ Be careful with this option. Large websites can contain thousands or millions of
 Recommended safer version:
 
 ```bash
-python run.py https://example.com -o mirror_example --max-pages 5000 --include-external --delay 1
+python run.py https://example.com -o mirror_example --max-pages 5000 --delay 1
 ```
 
 ---
@@ -154,7 +184,7 @@ After the mirror is generated, you can serve the downloaded site with Python's b
 For example, if you used:
 
 ```bash
-python run.py https://example.com -o mirror_example --max-pages 50 --include-external
+python run.py https://example.com -o mirror_example --max-pages 50
 ```
 
 Enter the generated output folder:
@@ -196,7 +226,7 @@ http://localhost:8080/example.com/
 For the example:
 
 ```bash
-python run.py https://limbs.fromtheghost.com/ -o web_mirror_limbs_fromtheghost --max-pages 5000 --include-external
+python run.py https://limbs.fromtheghost.com/ -o web_mirror_limbs_fromtheghost --max-pages 5000
 ```
 
 Run:
@@ -296,13 +326,13 @@ python run.py https://example.com -o mirror_example --max-pages 100 --include-ex
 ### Large internal crawl
 
 ```bash
-python run.py https://example.com -o mirror_example --max-pages 5000 --include-external --delay 1
+python run.py https://example.com -o mirror_example --max-pages 5000 --delay 1
 ```
 
 ### No page limit
 
 ```bash
-python run.py https://example.com -o mirror_example --max-pages 0 --include-external --delay 1
+python run.py https://example.com -o mirror_example --max-pages 0 --delay 1
 ```
 
 ### Run with a visible browser

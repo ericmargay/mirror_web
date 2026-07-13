@@ -8,6 +8,7 @@ from .config import MirrorConfig
 from .policies import CrawlPolicy
 from .resources import ResourceDownloader
 from .rewriters import CssRewriter, HtmlRewriter
+from .snapshot import write_snapshot
 from .storage import FileStorage
 from .url_utils import clean_url
 
@@ -15,7 +16,7 @@ from .url_utils import clean_url
 class MirrorCrawler:
     """Coordinates browser rendering, asset capture, rewriting, and crawling."""
 
-    USER_AGENT = "Mozilla/5.0 AuthorizedStaticMirror/0.2"
+    USER_AGENT = "Mozilla/5.0 AuthorizedStaticMirror/0.3"
 
     def __init__(self, config: MirrorConfig) -> None:
         self.config = config
@@ -64,6 +65,7 @@ class MirrorCrawler:
     def crawl(self) -> None:
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
         queue: deque[str] = deque([clean_url(self.config.start_url)])
+        page_snapshots: list[dict] = []
 
         with BrowserSession(
             headed=self.config.headed,
@@ -88,8 +90,28 @@ class MirrorCrawler:
                     continue
 
                 self.visited_pages.add(current_url)
+
+                structured = browser.extract_structured() or {}
+                if structured:
+                    structured["url"] = current_url
+                    page_snapshots.append(structured)
+                    print(
+                        f"[snapshot] images: {len(structured.get('images', []))}"
+                        f" · states: {', '.join(structured.get('states', {}).keys()) or '-'}"
+                        f" · product cards: {len(structured.get('products', []))}"
+                    )
+
                 rewritten_html, discovered_links = self.html_rewriter.rewrite_html(html, current_url)
                 self.storage.save_text(current_url, rewritten_html, content_type="text/html", force_html=True)
+
+                # Best-quality variants (largest srcset candidate) are often
+                # never rendered, so the browser never requests them. Fetch
+                # them explicitly — they are the valuable copies.
+                if self.config.fetch_best_images:
+                    for img in structured.get("images", []):
+                        best = img.get("best_url")
+                        if best and best != img.get("url"):
+                            self.downloader.fetch_if_missing(best)
 
                 for link in discovered_links:
                     link = clean_url(link)
@@ -103,7 +125,12 @@ class MirrorCrawler:
                 if self.config.delay_seconds > 0:
                     time.sleep(self.config.delay_seconds)
 
+        snapshot_path = write_snapshot(
+            self.config.output_dir, self.config.start_url, page_snapshots, len(self.downloader.saved_urls)
+        )
+
         print("\nDone.")
         print(f"Pages saved: {len(self.visited_pages)}")
         print(f"Assets saved: {len(self.downloader.saved_urls)}")
+        print(f"Structured snapshot: {snapshot_path}")
         print(f"Output: {self.config.output_dir.resolve()}")

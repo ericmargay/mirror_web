@@ -28,6 +28,7 @@ class FileStorage:
     def __init__(self, output_dir: Path) -> None:
         self.output_dir = output_dir
         self.url_to_file: dict[str, Path] = {}
+        self.hash_to_file: dict[str, Path] = {}
 
     def extension_from_content_type(self, content_type: str | None) -> str:
         if not content_type:
@@ -77,10 +78,20 @@ class FileStorage:
         return self.url_to_file.get(clean_url(url))
 
     def save_bytes(self, url: str, body: bytes, content_type: str | None = None, force_html: bool = False) -> Path:
+        # Content-hash dedupe: identical bodies served under several URLs
+        # (CDN variants, cache busters) map to one file on disk.
+        if not force_html:
+            digest = hashlib.sha1(body).hexdigest()
+            existing = self.hash_to_file.get(digest)
+            if existing:
+                self.remember(url, existing)
+                return existing
         local_path = self.path_for_url(url, content_type=content_type, force_html=force_html)
         local_path.parent.mkdir(parents=True, exist_ok=True)
         local_path.write_bytes(body)
         self.remember(url, local_path)
+        if not force_html:
+            self.hash_to_file[digest] = local_path
         return local_path
 
     def save_text(self, url: str, text: str, content_type: str = "text/html", force_html: bool = True) -> Path:

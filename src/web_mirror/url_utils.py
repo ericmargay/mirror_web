@@ -13,6 +13,9 @@ def clean_url(url: str) -> str:
     if not urlparse(url).scheme:
         url = "https://" + url
     url, _ = urldefrag(url)
+    # Normalize the trailing slash so /page and /page/ are one visit.
+    if url.endswith("/") and urlparse(url).path != "":
+        url = url.rstrip("/")
     return url
 
 
